@@ -458,6 +458,22 @@ final class UndefinedSource[+T](override val name: Option[String]) extends FlowG
  */
 private[akka] object FlowGraphInternal {
 
+  /**
+   * INTERNAL API
+   * Workaround for issue #16109. Reflection, used by scalax.graph, is not thread
+   * safe. Initialize one graph before it is used for real.
+   */
+  private[akka] val reflectionIssueWorkaround = {
+    val graph = ImmutableGraph.empty[FlowGraphInternal.Vertex, FlowGraphInternal.EdgeType]
+    val builder = new FlowGraphBuilder(graph)
+    val merge = Merge[String]
+    builder.
+      addEdge(Source.empty[String], merge).
+      addEdge(Source.empty[String], merge).
+      addEdge(merge, Sink.ignore)
+    builder.build()
+  }
+
   def throwUnsupportedValue(x: Any): Nothing =
     throw new IllegalArgumentException(s"Unsupported value [$x] of type [${x.getClass.getName}]. Only Pipes and Graphs are supported!")
 
@@ -554,7 +570,7 @@ private[akka] object FlowGraphInternal {
 
 object FlowGraphBuilder {
   private[scaladsl] def apply[T](partialFlowGraph: PartialFlowGraph)(block: FlowGraphBuilder ⇒ T): T = {
-    val builder = new FlowGraphBuilder(partialFlowGraph.graph)
+    val builder = new FlowGraphBuilder(partialFlowGraph)
     block(builder)
   }
 }
@@ -571,6 +587,9 @@ class FlowGraphBuilder private[akka] (_graph: DirectedGraphBuilder[FlowGraphInte
 
   private var edgeQualifier = 0
   importGraph(_graph)
+  
+  private[akka] def this(flowGraph: FlowGraphLike) =
+    this(Graph.from(edges = FlowGraphInternal.edges(flowGraph.graph)), flowGraph.cyclesAllowed)
 
   private var cyclesAllowed = false
 
@@ -922,7 +941,7 @@ class FlowGraphBuilder private[akka] (_graph: DirectedGraphBuilder[FlowGraphInte
 
     vertex match {
       case node @ (_: UndefinedSource[_] | _: UndefinedSink[_]) ⇒
-        require(!graph.contains(node), s"[$node] instance is already used in this flow graph")
+        require(!graph.contains(node), s"[$node] instance is already used in this flow graph [${graph.nodes.map(_.toString)}]")
       case _ ⇒ // ok
     }
   }
@@ -1072,14 +1091,14 @@ object FlowGraph {
    * [[FlowGraphBuilder#attachSource]] and [[FlowGraphBuilder#attachSink]]
    */
   def apply(partialFlowGraph: PartialFlowGraph)(block: FlowGraphBuilder ⇒ Unit): FlowGraph =
-    apply(partialFlowGraph.graph)(block)
+    apply(new FlowGraphBuilder(partialFlowGraph))(block)
 
   /**
    * Continue building a [[FlowGraph]] from an existing `FlowGraph`.
    * For example you can connect more output flows to a [[Broadcast]] vertex.
    */
   def apply(flowGraph: FlowGraph)(block: FlowGraphBuilder ⇒ Unit): FlowGraph =
-    apply(flowGraph.graph)(block)
+    apply(new FlowGraphBuilder(flowGraph))(block)
 
   private def apply(graph: DirectedGraphBuilder[FlowGraphInternal.EdgeLabel, FlowGraphInternal.Vertex])(block: FlowGraphBuilder ⇒ Unit): FlowGraph = {
     val builder = new FlowGraphBuilder(graph)
@@ -1252,13 +1271,13 @@ object PartialFlowGraph {
    * Continue building a [[PartialFlowGraph]] from an existing `PartialFlowGraph`.
    */
   def apply(partialFlowGraph: PartialFlowGraph)(block: FlowGraphBuilder ⇒ Unit): PartialFlowGraph =
-    apply(partialFlowGraph.graph)(block)
+    apply(new FlowGraphBuilder(partialFlowGraph))(block)
 
   /**
-   * Continue building a [[PartialFlowGraph]] from an existing `PartialFlowGraph`.
+   * Continue building a [[PartialFlowGraph]] from an existing `FlowGraph`.
    */
   def apply(flowGraph: FlowGraph)(block: FlowGraphBuilder ⇒ Unit): PartialFlowGraph =
-    apply(flowGraph.graph)(block)
+    apply(new FlowGraphBuilder(flowGraph))(block)
 
   private def apply(graph: DirectedGraphBuilder[FlowGraphInternal.EdgeLabel, FlowGraphInternal.Vertex])(block: FlowGraphBuilder ⇒ Unit): PartialFlowGraph = {
     // FlowGraphBuilder does a full import on the passed graph, so no defensive copy needed
@@ -1275,7 +1294,9 @@ object PartialFlowGraph {
  * Build a `PartialFlowGraph` by starting with one of the `apply` methods in
  * in [[FlowGraph$ companion object]]. Syntactic sugar is provided by [[FlowGraphImplicits]].
  */
-class PartialFlowGraph private[akka] (private[akka] val graph: DirectedGraphBuilder[FlowGraphInternal.EdgeLabel, FlowGraphInternal.Vertex]) {
+class PartialFlowGraph private[akka] (private[akka] val graph: DirectedGraphBuilder[FlowGraphInternal.EdgeLabel, FlowGraphInternal.Vertex],
+  private[scaladsl] override val cyclesAllowed: Boolean) extends FlowGraphLike {
+
   import FlowGraphInternal._
 
   def undefinedSources: Set[UndefinedSource[_]] =
@@ -1314,6 +1335,15 @@ class PartialFlowGraph private[akka] (private[akka] val graph: DirectedGraphBuil
   def toSink[I](in: UndefinedSource[I]): Sink[I] = {
     checkUndefinedSinksAndSources(sources = List(in), sinks = Nil, description = "Sink")
     GraphSink(Pipe.empty[I], in, this)
+  }
+
+  /**
+   * Creates a [[Stage]] from this `PartialFlowGraph`. There needs to be only two [[UndefinedSource]] and
+   * two [[UndefinedSink]] in the graph, and you need to provide them as parameters.
+   */
+  def toStage[I1, O1, I2, O2](in1: UndefinedSource[I1], out1: UndefinedSink[O1], in2: UndefinedSource[I2], out2: UndefinedSink[O2]): Stage[I1, O1, I2, O2] = {
+    checkUndefinedSinksAndSources(sources = List(in1, in2), sinks = List(out1, out2), description = "Stage")
+    new Stage(in1, out1, in2, out2, this)
   }
 
   private def checkUndefinedSinksAndSources(sources: List[UndefinedSource[_]], sinks: List[UndefinedSink[_]], description: String): Unit = {
@@ -1358,6 +1388,16 @@ private[scaladsl] class MaterializedFlowGraph(materializedSources: Map[KeyedSour
       }
       case _ ⇒ ().asInstanceOf[key.MaterializedType]
     }
+}
+
+/**
+ * INTERNAL API
+ *
+ * Common things that the builder needs to extract from FlowGraph and PartialFlowGraph
+ */
+private[scaladsl] trait FlowGraphLike {
+  private[scaladsl] def graph: ImmutableGraph[FlowGraphInternal.Vertex, FlowGraphInternal.EdgeType]
+  private[scaladsl] def cyclesAllowed: Boolean
 }
 
 /**

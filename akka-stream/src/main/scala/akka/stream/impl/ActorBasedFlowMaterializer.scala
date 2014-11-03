@@ -74,6 +74,18 @@ private[akka] object Ast {
     override def name = "concatFlatten"
   }
 
+  case class Conflate(seed: Any ⇒ Any, aggregate: (Any, Any) ⇒ Any) extends AstNode {
+    override def name = "conflate"
+  }
+
+  case class Expand(seed: Any ⇒ Any, extrapolate: Any ⇒ (Any, Any)) extends AstNode {
+    override def name = "expand"
+  }
+
+  case class Buffer(size: Int, overflowStrategy: OverflowStrategy) extends AstNode {
+    override def name = "buffer"
+  }
+
   sealed trait JunctionAstNode {
     def name: String
   }
@@ -212,8 +224,12 @@ case class ActorBasedFlowMaterializer(override val settings: MaterializerSetting
    * INTERNAL API
    */
   private[akka] def processorForNode(op: AstNode, flowName: String, n: Int): Processor[Any, Any] = {
-    val impl = actorOf(ActorProcessorFactory.props(this, op), s"$flowName-$n-${op.name}")
-    ActorProcessorFactory(impl)
+    op match {
+      case Ast.DirectProcessor(p) ⇒ p()
+      case _ ⇒
+        val impl = actorOf(ActorProcessorFactory.props(this, op), s"$flowName-$n-${op.name}")
+        ActorProcessorFactory(impl)
+    }
   }
 
   def actorOf(props: Props, name: String): ActorRef = supervisor match {

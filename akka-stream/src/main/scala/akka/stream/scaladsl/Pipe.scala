@@ -3,7 +3,9 @@
  */
 package akka.stream.scaladsl
 
+import akka.stream.impl.Ast
 import akka.stream.impl.Ast.AstNode
+import org.reactivestreams.Processor
 import scala.annotation.unchecked.uncheckedVariance
 import scala.language.{ existentials, higherKinds }
 import akka.stream.FlowMaterializer
@@ -11,6 +13,9 @@ import akka.stream.FlowMaterializer
 private[stream] object Pipe {
   private val emptyInstance = Pipe[Any, Any](ops = Nil)
   def empty[T]: Pipe[T, T] = emptyInstance.asInstanceOf[Pipe[T, T]]
+
+  private[stream] def apply[In, Out](p: () ⇒ Processor[In, Out]): Pipe[In, Out] =
+    new Pipe[In, Out](List(Ast.DirectProcessor(() ⇒ p().asInstanceOf[Processor[Any, Any]])))
 }
 
 /**
@@ -26,7 +31,7 @@ private[stream] final case class Pipe[-In, +Out](ops: List[AstNode]) extends Flo
   private[stream] def withSource(in: Source[In]): SourcePipe[Out] = SourcePipe(in, ops)
 
   override def via[T](flow: Flow[Out, T]): Flow[In, T] = flow match {
-    case p: Pipe[T, In]              ⇒ Pipe(p.ops ++: ops)
+    case p: Pipe[Out, T]             ⇒ Pipe(p.ops ++: ops)
     case gf: GraphFlow[Out, _, _, T] ⇒ gf.prepend(this)
     case x                           ⇒ FlowGraphInternal.throwUnsupportedValue(x)
   }
@@ -35,6 +40,12 @@ private[stream] final case class Pipe[-In, +Out](ops: List[AstNode]) extends Flo
     case sp: SinkPipe[Out]     ⇒ sp.prependPipe(this)
     case gs: GraphSink[Out, _] ⇒ gs.prepend(this)
     case d: Sink[Out]          ⇒ this.withSink(d)
+  }
+
+  override def join(flow: Flow[Out, In]): RunnableFlow = flow match {
+    case p: Pipe[Out, In]             ⇒ GraphFlow(this).join(p)
+    case gf: GraphFlow[Out, _, _, In] ⇒ gf.join(this)
+    case x                            ⇒ FlowGraphInternal.throwUnsupportedValue(x)
   }
 
   private[stream] def appendPipe[T](pipe: Pipe[Out, T]): Pipe[In, T] = Pipe(pipe.ops ++: ops)
