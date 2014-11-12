@@ -50,6 +50,10 @@ private[akka] object Ast {
 
   case class OpFactory(mkOps: List[() ⇒ Op[_, _, _, _, _]], name: String) extends AstNode
 
+  case class DirectProcessor(p: () ⇒ Processor[Any, Any]) extends AstNode {
+    override def name = "processor"
+  }
+
   case class MapAsync(f: Any ⇒ Future[Any]) extends AstNode {
     override def name = "mapAsync"
   }
