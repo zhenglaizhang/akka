@@ -49,7 +49,6 @@ class TcpFlowSpec extends AkkaSpec with TcpHelper {
       val serverConnection = server.waitAccept()
       serverConnection.read(256)
       serverConnection.waitRead() should be(expectedOutput)
-
     }
 
     "be able to read a sequence of ByteStrings" in {
@@ -66,7 +65,6 @@ class TcpFlowSpec extends AkkaSpec with TcpHelper {
 
       for (in ← testInput) {
         serverConnection.write(in)
-        Thread.sleep(10)
       }
 
       serverConnection.confirmedClose()
@@ -173,6 +171,9 @@ class TcpFlowSpec extends AkkaSpec with TcpHelper {
       val echoServerFinish = echoServer.get(echoHandler)
       val echoServerBinding = echoServer.get(binding)
 
+      // make sure that the server has bound to the socket
+      Await.result(echoServerBinding, 3.seconds)
+
       val testInput = Iterator.range(0, 256).map(ByteString(_))
       val expectedOutput = ByteString(Array.tabulate(256)(_.asInstanceOf[Byte]))
       val resultFuture =
@@ -192,6 +193,9 @@ class TcpFlowSpec extends AkkaSpec with TcpHelper {
 
       val echoServerFinish = echoServer.get(echoHandler)
       val echoServerBinding = echoServer.get(binding)
+
+      // make sure that the server has bound to the socket
+      Await.result(echoServerBinding, 3.seconds)
 
       val echoConnection = StreamTcp(system).connect(serverAddress)
 

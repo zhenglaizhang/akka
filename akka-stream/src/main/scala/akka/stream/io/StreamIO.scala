@@ -216,7 +216,8 @@ private[akka] class StreamTcpManager extends Actor {
         Tcp.Bind(context.system.deadLetters, localAddress, backlog, options, pullMode = true),
         requester = sender(),
         materializerSettings), name = encName("server", localAddress))
-      publisherActor ! ExposedPublisher(ActorPublisher[Any](publisherActor))
+      // this sends the ExposedPublisher message to the publisher actor automatically
+      ActorPublisher[Any](publisherActor)
   }
 }
 

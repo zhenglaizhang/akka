@@ -3,18 +3,15 @@
  */
 package akka.stream.scaladsl
 
-import akka.stream.impl.Ast.FanInAstNode
-import akka.stream.impl.Ast
-import java.util
+import java.util.concurrent.atomic.AtomicReference
 
-import org.reactivestreams.Publisher
-import org.reactivestreams.Subscriber
+import akka.stream.FlowMaterializer
+import akka.stream.impl.Ast
+import akka.stream.impl.Ast.FanInAstNode
+import akka.stream.impl.{ DirectedGraphBuilder, Edge }
+import org.reactivestreams._
 
 import scala.language.existentials
-import org.reactivestreams.Subscriber
-import org.reactivestreams.Publisher
-import akka.stream.FlowMaterializer
-import akka.stream.impl.{ DirectedGraphBuilder, Edge, Vertex ⇒ GVertex }
 
 /**
  * Fan-in and fan-out vertices in the [[FlowGraph]] implements
@@ -550,6 +547,56 @@ private[akka] object FlowGraphInternal {
 
   }
 
+  /**
+   * INTERNAL API
+   *
+   * This is a minimalistic processor to tie a loop that when we know that we are materializing a flow
+   * and only have one upstream and one downstream.
+   */
+  class IdentityProcessor extends Processor[Any, Any] {
+    import akka.stream.actor.ActorSubscriber.OnSubscribe
+    import akka.stream.actor.ActorSubscriberMessage._
+
+    @volatile private var subscriber: Subscriber[Any] = null
+    private val state = new AtomicReference[AnyRef]()
+
+    override def onSubscribe(s: Subscription) =
+      if (subscriber != null) subscriber.onSubscribe(s)
+      else state.getAndSet(OnSubscribe(s)) match {
+        case sub: Subscriber[Any] ⇒ sub.onSubscribe(s)
+        case _                    ⇒
+      }
+
+    override def onError(t: Throwable) =
+      if (subscriber != null) subscriber.onError(t)
+      else state.getAndSet(OnError(t)) match {
+        case sub: Subscriber[Any] ⇒ sub.onError(t)
+        case _                    ⇒
+      }
+
+    override def onComplete() =
+      if (subscriber != null) subscriber.onComplete()
+      else state.getAndSet(OnComplete) match {
+        case sub: Subscriber[Any] ⇒ sub.onComplete()
+        case _                    ⇒
+      }
+
+    override def onNext(t: Any) =
+      if (subscriber != null) subscriber.onNext(t)
+      else throw new IllegalStateException("IdentityProcessor received onNext before signaling demand")
+
+    override def subscribe(sub: Subscriber[_ >: Any]) =
+      if (subscriber != null) sub.onError(new IllegalStateException("IdentityProcessor can only be subscribed to once"))
+      else {
+        subscriber = sub.asInstanceOf[Subscriber[Any]]
+        if (!state.compareAndSet(null, sub)) state.get match {
+          case OnSubscribe(s) ⇒ sub.onSubscribe(s)
+          case OnError(t)     ⇒ sub.onError(t)
+          case OnComplete     ⇒ sub.onComplete()
+          case s              ⇒ throw new IllegalStateException(s"IdentityProcessor found unknown state $s")
+        }
+      }
+  }
 }
 
 object FlowGraphBuilder {
@@ -862,14 +909,16 @@ class FlowGraphBuilder private[akka] (_graph: DirectedGraphBuilder[FlowGraphInte
     val inEdge = graph.get(in).outgoing.head
     flow match {
       case pipe: Pipe[A, B] ⇒
-        val newPipe = outEdge.label.pipe.appendPipe(pipe.asInstanceOf[Pipe[Any, Nothing]]).appendPipe(inEdge.label.pipe)
         graph.remove(out)
         graph.remove(in)
         if (out == inEdge.to.label && in == outEdge.from.label) {
-          val identity = new Identity[Any]
-          graph.addVertex(identity)
-          addOrReplaceGraphEdge(identity, identity, newPipe, inEdge.label.inputPort, outEdge.label.outputPort)
-        } else addOrReplaceGraphEdge(outEdge.from.label, inEdge.to.label, newPipe, inEdge.label.inputPort, outEdge.label.outputPort)
+          val newPipe = outEdge.label.pipe.appendPipe(pipe.asInstanceOf[Pipe[Any, Nothing]])
+          val identityProcessor = new IdentityProcessor
+          addEdge(Source(identityProcessor), newPipe, Sink(identityProcessor))
+        } else {
+          val newPipe = outEdge.label.pipe.appendPipe(pipe.asInstanceOf[Pipe[Any, Nothing]]).appendPipe(inEdge.label.pipe)
+          addOrReplaceGraphEdge(outEdge.from.label, inEdge.to.label, newPipe, inEdge.label.inputPort, outEdge.label.outputPort)
+        }
       case gflow: GraphFlow[A, _, _, B] ⇒
         gflow.importAndConnect(this, out, in)
       case x ⇒ throwUnsupportedValue(x)
