@@ -4,6 +4,9 @@
 package akka.stream.impl.io
 
 import java.net.InetSocketAddress
+import java.util.concurrent.atomic.AtomicReference
+import akka.stream.scaladsl.StreamTcp.CloseMode
+
 import scala.concurrent.{ Future, Promise }
 import akka.actor.Actor
 import akka.actor.ActorRef
@@ -26,9 +29,10 @@ import akka.actor.ActorLogging
 private[akka] object TcpListenStreamActor {
   def props(localAddressPromise: Promise[InetSocketAddress],
             unbindPromise: Promise[() ⇒ Future[Unit]],
+            closeMode: CloseMode,
             flowSubscriber: Subscriber[StreamTcp.IncomingConnection],
             bindCmd: Tcp.Bind, materializerSettings: ActorFlowMaterializerSettings): Props = {
-    Props(new TcpListenStreamActor(localAddressPromise, unbindPromise, flowSubscriber, bindCmd, materializerSettings))
+    Props(new TcpListenStreamActor(localAddressPromise, unbindPromise, closeMode, flowSubscriber, bindCmd, materializerSettings))
   }
 }
 
@@ -37,6 +41,7 @@ private[akka] object TcpListenStreamActor {
  */
 private[akka] class TcpListenStreamActor(localAddressPromise: Promise[InetSocketAddress],
                                          unbindPromise: Promise[() ⇒ Future[Unit]],
+                                         closeMode: CloseMode,
                                          flowSubscriber: Subscriber[StreamTcp.IncomingConnection],
                                          bindCmd: Tcp.Bind, settings: ActorFlowMaterializerSettings) extends Actor
   with Pump with ActorLogging {
@@ -143,12 +148,13 @@ private[akka] class TcpListenStreamActor(localAddressPromise: Promise[InetSocket
 
   def runningPhase = TransferPhase(primaryOutputs.NeedsDemand && incomingConnections.NeedsInput) { () ⇒
     val (connected: Connected, connection: ActorRef) = incomingConnections.dequeueInputElement()
-    val tcpStreamActor = context.actorOf(TcpStreamActor.inboundProps(connection, settings))
+    val closeModeRef = new AtomicReference[CloseMode](closeMode)
+    val tcpStreamActor = context.actorOf(TcpStreamActor.inboundProps(connection, closeModeRef, settings))
     val processor = ActorProcessor[ByteString, ByteString](tcpStreamActor)
     val conn = StreamTcp.IncomingConnection(
       connected.localAddress,
       connected.remoteAddress,
-      Flow[ByteString].andThenMat(() ⇒ (processor, ())))
+      Flow[ByteString].andThenMat(() ⇒ (processor, ())))(closeModeRef)
     primaryOutputs.enqueueOutputElement(conn)
   }
 

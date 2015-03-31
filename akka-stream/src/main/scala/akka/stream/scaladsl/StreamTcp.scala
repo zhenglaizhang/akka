@@ -4,6 +4,7 @@
 package akka.stream.scaladsl
 
 import java.net.{ InetSocketAddress, URLEncoder }
+import java.util.concurrent.atomic.AtomicReference
 import akka.stream.impl.StreamLayout.Module
 import scala.collection.immutable
 import scala.concurrent.{ Promise, ExecutionContext, Future }
@@ -34,7 +35,7 @@ import akka.stream.impl.io.StreamTcpManager
 object StreamTcp extends ExtensionId[StreamTcp] with ExtensionIdProvider {
 
   /**
-   * * Represents a succdessful TCP server binding.
+   * Represents a succdessful TCP server binding.
    */
   case class ServerBinding(localAddress: InetSocketAddress)(private val unbindAction: () ⇒ Future[Unit]) {
     def unbind(): Future[Unit] = unbindAction()
@@ -46,7 +47,7 @@ object StreamTcp extends ExtensionId[StreamTcp] with ExtensionIdProvider {
   case class IncomingConnection(
     localAddress: InetSocketAddress,
     remoteAddress: InetSocketAddress,
-    flow: Flow[ByteString, ByteString, Unit]) {
+    flow: Flow[ByteString, ByteString, Unit])(private val currentCloseMode: AtomicReference[CloseMode]) {
 
     /**
      * Handles the connection using the given flow, which is materialized exactly once and the respective
@@ -57,12 +58,31 @@ object StreamTcp extends ExtensionId[StreamTcp] with ExtensionIdProvider {
     def handleWith[Mat](handler: Flow[ByteString, ByteString, Mat])(implicit materializer: FlowMaterializer): Mat =
       flow.joinMat(handler)(Keep.right).run()
 
+    def setCloseMode(closeMode: CloseMode): Unit = currentCloseMode.set(closeMode)
   }
 
   /**
-   * Represents a prospective outgoing TCP connection.
+   * Represents an established outgoing TCP connection.
    */
-  case class OutgoingConnection(remoteAddress: InetSocketAddress, localAddress: InetSocketAddress)
+  case class OutgoingConnection(remoteAddress: InetSocketAddress, localAddress: InetSocketAddress)(
+    private val currentCloseMode: AtomicReference[CloseMode]) {
+
+    def setCloseMode(closeMode: CloseMode): Unit = currentCloseMode.set(closeMode)
+  }
+
+  /**
+   * The close mode of an incoming/outgoing connection.
+   */
+  sealed trait CloseMode
+  object CloseMode {
+
+    case object Confirmed extends CloseMode
+
+    case object Normal extends CloseMode
+
+    case object Abort extends CloseMode
+
+  }
 
   def apply()(implicit system: ActorSystem): StreamTcp = super.apply(system)
 
@@ -83,7 +103,8 @@ class StreamTcp(system: ExtendedActorSystem) extends akka.actor.Extension {
     val endpoint: InetSocketAddress,
     val backlog: Int,
     val options: immutable.Traversable[SocketOption],
-    val idleTimeout: Duration = Duration.Inf,
+    val idleTimeout: Duration,
+    val closeMode: CloseMode,
     val attributes: OperationAttributes,
     _shape: SourceShape[IncomingConnection]) extends SourceModule[IncomingConnection, Future[ServerBinding]](_shape) {
 
@@ -97,6 +118,7 @@ class StreamTcp(system: ExtendedActorSystem) extends akka.actor.Extension {
           manager ! StreamTcpManager.Bind(
             localAddressPromise,
             unbindPromise,
+            closeMode,
             s.asInstanceOf[Subscriber[IncomingConnection]],
             endpoint,
             backlog,
@@ -115,9 +137,9 @@ class StreamTcp(system: ExtendedActorSystem) extends akka.actor.Extension {
     }
 
     override protected def newInstance(s: SourceShape[IncomingConnection]): SourceModule[IncomingConnection, Future[ServerBinding]] =
-      new BindSource(endpoint, backlog, options, idleTimeout, attributes, shape)
+      new BindSource(endpoint, backlog, options, idleTimeout, closeMode, attributes, shape)
     override def withAttributes(attr: OperationAttributes): Module =
-      new BindSource(endpoint, backlog, options, idleTimeout, attr, shape)
+      new BindSource(endpoint, backlog, options, idleTimeout, closeMode, attr, shape)
   }
 
   /**
@@ -126,8 +148,9 @@ class StreamTcp(system: ExtendedActorSystem) extends akka.actor.Extension {
   def bind(endpoint: InetSocketAddress,
            backlog: Int = 100,
            options: immutable.Traversable[SocketOption] = Nil,
-           idleTimeout: Duration = Duration.Inf): Source[IncomingConnection, Future[ServerBinding]] = {
-    new Source(new BindSource(endpoint, backlog, options, idleTimeout, OperationAttributes.none, SourceShape(new Outlet("BindSource.out"))))
+           idleTimeout: Duration = Duration.Inf,
+           closeMode: CloseMode = CloseMode.Confirmed): Source[IncomingConnection, Future[ServerBinding]] = {
+    new Source(new BindSource(endpoint, backlog, options, idleTimeout, closeMode, OperationAttributes.none, SourceShape(new Outlet("BindSource.out"))))
   }
 
   def bindAndHandle(
@@ -148,16 +171,18 @@ class StreamTcp(system: ExtendedActorSystem) extends akka.actor.Extension {
                          localAddress: Option[InetSocketAddress] = None,
                          options: immutable.Traversable[SocketOption] = Nil,
                          connectTimeout: Duration = Duration.Inf,
-                         idleTimeout: Duration = Duration.Inf): Flow[ByteString, ByteString, Future[OutgoingConnection]] = {
+                         idleTimeout: Duration = Duration.Inf,
+                         closeMode: CloseMode = CloseMode.Confirmed): Flow[ByteString, ByteString, Future[OutgoingConnection]] = {
 
     val remoteAddr = remoteAddress
 
     Flow[ByteString].andThenMat(() ⇒ {
       val processorPromise = Promise[Processor[ByteString, ByteString]]()
       val localAddressPromise = Promise[InetSocketAddress]()
-      manager ! StreamTcpManager.Connect(processorPromise, localAddressPromise, remoteAddress, localAddress, options,
+      val closeModeRef = new AtomicReference[CloseMode](closeMode)
+      manager ! StreamTcpManager.Connect(processorPromise, localAddressPromise, closeModeRef, remoteAddress, localAddress, options,
         connectTimeout, idleTimeout)
-      val outgoingConnection = localAddressPromise.future.map(OutgoingConnection(remoteAddress, _))
+      val outgoingConnection = localAddressPromise.future.map(OutgoingConnection(remoteAddress, _)(closeModeRef))
       (new DelayedInitProcessor[ByteString, ByteString](processorPromise.future), outgoingConnection)
     })
 

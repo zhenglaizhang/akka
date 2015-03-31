@@ -5,6 +5,9 @@ package akka.stream.impl.io
 
 import java.net.InetSocketAddress
 import java.net.URLEncoder
+import java.util.concurrent.atomic.AtomicReference
+import akka.stream.scaladsl.StreamTcp.CloseMode
+
 import scala.collection.immutable
 import scala.concurrent.Future
 import scala.concurrent.Promise
@@ -32,6 +35,7 @@ private[akka] object StreamTcpManager {
   private[akka] final case class Connect(
     processorPromise: Promise[Processor[ByteString, ByteString]],
     localAddressPromise: Promise[InetSocketAddress],
+    closeModeRef: AtomicReference[CloseMode],
     remoteAddress: InetSocketAddress,
     localAddress: Option[InetSocketAddress],
     options: immutable.Traversable[SocketOption],
@@ -45,6 +49,7 @@ private[akka] object StreamTcpManager {
   private[akka] final case class Bind(
     localAddressPromise: Promise[InetSocketAddress],
     unbindPromise: Promise[() ⇒ Future[Unit]],
+    closeMode: CloseMode,
     flowSubscriber: Subscriber[StreamTcp.IncomingConnection],
     endpoint: InetSocketAddress,
     backlog: Int,
@@ -73,18 +78,18 @@ private[akka] class StreamTcpManager extends Actor {
   }
 
   def receive: Receive = {
-    case Connect(processorPromise, localAddressPromise, remoteAddress, localAddress, options, connectTimeout, _) ⇒
+    case Connect(processorPromise, localAddressPromise, closeModeRef, remoteAddress, localAddress, options, connectTimeout, _) ⇒
       val connTimeout = connectTimeout match {
         case x: FiniteDuration ⇒ Some(x)
         case _                 ⇒ None
       }
-      val processorActor = context.actorOf(TcpStreamActor.outboundProps(processorPromise, localAddressPromise,
+      val processorActor = context.actorOf(TcpStreamActor.outboundProps(processorPromise, localAddressPromise, closeModeRef,
         Tcp.Connect(remoteAddress, localAddress, options, connTimeout, pullMode = true),
         materializerSettings = ActorFlowMaterializerSettings(context.system)), name = encName("client", remoteAddress))
       processorActor ! ExposedProcessor(ActorProcessor[ByteString, ByteString](processorActor))
 
-    case Bind(localAddressPromise, unbindPromise, flowSubscriber, endpoint, backlog, options, _) ⇒
-      val publisherActor = context.actorOf(TcpListenStreamActor.props(localAddressPromise, unbindPromise,
+    case Bind(localAddressPromise, unbindPromise, closeMode, flowSubscriber, endpoint, backlog, options, _) ⇒
+      val publisherActor = context.actorOf(TcpListenStreamActor.props(localAddressPromise, unbindPromise, closeMode,
         flowSubscriber, Tcp.Bind(context.system.deadLetters, endpoint, backlog, options, pullMode = true),
         ActorFlowMaterializerSettings(context.system)), name = encName("server", endpoint))
       // this sends the ExposedPublisher message to the publisher actor automatically

@@ -4,7 +4,9 @@
 package akka.stream.impl.io
 
 import java.net.InetSocketAddress
+import java.util.concurrent.atomic.AtomicReference
 import akka.io.{ IO, Tcp }
+import akka.stream.scaladsl.StreamTcp.CloseMode
 import scala.concurrent.Promise
 import scala.util.control.NoStackTrace
 import akka.actor._
@@ -24,19 +26,20 @@ private[akka] object TcpStreamActor {
 
   def outboundProps(processorPromise: Promise[Processor[ByteString, ByteString]],
                     localAddressPromise: Promise[InetSocketAddress],
+                    closeModeRef: AtomicReference[CloseMode],
                     connectCmd: Connect,
                     materializerSettings: ActorFlowMaterializerSettings): Props =
-    Props(new OutboundTcpStreamActor(processorPromise, localAddressPromise, connectCmd,
+    Props(new OutboundTcpStreamActor(processorPromise, localAddressPromise, closeModeRef, connectCmd,
       materializerSettings)).withDispatcher(materializerSettings.dispatcher)
 
-  def inboundProps(connection: ActorRef, settings: ActorFlowMaterializerSettings): Props =
-    Props(new InboundTcpStreamActor(connection, settings)).withDispatcher(settings.dispatcher)
+  def inboundProps(connection: ActorRef, closeModeRef: AtomicReference[CloseMode], settings: ActorFlowMaterializerSettings): Props =
+    Props(new InboundTcpStreamActor(connection, closeModeRef, settings)).withDispatcher(settings.dispatcher)
 }
 
 /**
  * INTERNAL API
  */
-private[akka] abstract class TcpStreamActor(val settings: ActorFlowMaterializerSettings) extends Actor
+private[akka] abstract class TcpStreamActor(closeModeRef: AtomicReference[CloseMode], val settings: ActorFlowMaterializerSettings) extends Actor
   with ActorLogging {
 
   import TcpStreamActor._
@@ -112,10 +115,12 @@ private[akka] abstract class TcpStreamActor(val settings: ActorFlowMaterializerS
 
   object tcpOutputs extends DefaultOutputTransferStates {
     private var closed: Boolean = false
+    private var completed: Boolean = false
     private var pendingDemand = true
     private var connection: ActorRef = _
 
     def isClosed: Boolean = closed
+    def isCompleted: Boolean = closed
     private def initialized: Boolean = connection ne null
 
     def setConnection(c: ActorRef): Unit = {
@@ -130,7 +135,6 @@ private[akka] abstract class TcpStreamActor(val settings: ActorFlowMaterializerS
       case WriteAck ⇒
         pendingDemand = true
         writePump.pump()
-
     }
 
     override def error(e: Throwable): Unit = {
@@ -141,10 +145,14 @@ private[akka] abstract class TcpStreamActor(val settings: ActorFlowMaterializerS
     override def complete(): Unit = {
       if (!closed && initialized) {
         closed = true
+        completed = true
         if (tcpInputs.isClosed)
           connection ! Close
-        else
-          connection ! ConfirmedClose
+        else connection ! (closeModeRef.get() match {
+          case CloseMode.Normal    ⇒ Close
+          case CloseMode.Confirmed ⇒ ConfirmedClose
+          case CloseMode.Abort     ⇒ Abort
+        })
       }
     }
 
@@ -204,14 +212,18 @@ private[akka] abstract class TcpStreamActor(val settings: ActorFlowMaterializerS
       commonCloseHandling
 
   def commonCloseHandling: Receive = {
-    case Closed ⇒
-      tcpInputs.cancel()
-      tcpOutputs.complete()
-      writePump.pump()
-      readPump.pump()
-    case ErrorClosed(cause) ⇒ fail(new StreamTcpException(s"The connection closed with error $cause"))
-    case CommandFailed(cmd) ⇒ fail(new StreamTcpException(s"Tcp command [$cmd] failed"))
-    case Aborted            ⇒ fail(new StreamTcpException("The connection has been aborted"))
+    case Closed                            ⇒ shutDownStream
+    case ErrorClosed(cause)                ⇒ fail(new StreamTcpException(s"The connection closed with error $cause"))
+    case CommandFailed(cmd)                ⇒ fail(new StreamTcpException(s"Tcp command [$cmd] failed"))
+    case Aborted if tcpOutputs.isCompleted ⇒ shutDownStream
+    case Aborted                           ⇒ fail(new StreamTcpException("The connection has been aborted"))
+  }
+
+  private def shutDownStream: Unit = {
+    tcpInputs.cancel()
+    tcpOutputs.complete()
+    writePump.pump()
+    readPump.pump()
   }
 
   readPump.nextPhase(readPump.running)
@@ -245,8 +257,10 @@ private[akka] abstract class TcpStreamActor(val settings: ActorFlowMaterializerS
  * INTERNAL API
  */
 private[akka] class InboundTcpStreamActor(
-  val connection: ActorRef, _settings: ActorFlowMaterializerSettings)
-  extends TcpStreamActor(_settings) {
+  connection: ActorRef,
+  _closeMode: AtomicReference[CloseMode],
+  _settings: ActorFlowMaterializerSettings)
+  extends TcpStreamActor(_closeMode, _settings) {
 
   connection ! Register(self, keepOpenOnPeerClosed = true, useResumeWriting = false)
   tcpInputs.setConnection(connection)
@@ -258,9 +272,10 @@ private[akka] class InboundTcpStreamActor(
  */
 private[akka] class OutboundTcpStreamActor(processorPromise: Promise[Processor[ByteString, ByteString]],
                                            localAddressPromise: Promise[InetSocketAddress],
-                                           val connectCmd: Connect, _settings: ActorFlowMaterializerSettings)
-  extends TcpStreamActor(_settings) {
-  import TcpStreamActor._
+                                           _closeMode: AtomicReference[CloseMode],
+                                           connectCmd: Connect,
+                                           _settings: ActorFlowMaterializerSettings)
+  extends TcpStreamActor(_closeMode, _settings) {
   import context.system
 
   val initSteps = new SubReceive(waitingExposedProcessor)
