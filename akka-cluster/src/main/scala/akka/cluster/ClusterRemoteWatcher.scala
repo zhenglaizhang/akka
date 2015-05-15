@@ -36,7 +36,7 @@ private[cluster] object ClusterRemoteWatcher {
  *
  * Specialization of [[akka.remote.RemoteWatcher]] that keeps
  * track of cluster member nodes and is responsible for watchees on cluster nodes.
- * [[akka.actor.AddressTerminate]] is published when node is removed from cluster.
+ * [[akka.actor.AddressTerminated]] is published when node is removed from cluster.
  *
  * `RemoteWatcher` handles non-cluster nodes. `ClusterRemoteWatcher` will take
  * over responsibility from `RemoteWatcher` if a watch is added before a node is member
