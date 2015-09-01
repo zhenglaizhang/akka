@@ -31,6 +31,10 @@ object NodeChurnMultiJvmSpec extends MultiNodeConfig {
       """)).
     withFallback(MultiNodeClusterSpec.clusterConfig))
 
+  nodeConfig(second, third)(ConfigFactory.parseString("""
+      akka.loglevel=ERROR
+      """))
+
   class LogListener(testActor: ActorRef) extends Actor {
     def receive = {
       case Info(_, _, msg: String) if msg.startsWith("New maximum payload size for [akka.cluster.GossipEnvelope]") ⇒
@@ -56,9 +60,9 @@ abstract class NodeChurnSpec
     super.afterAll()
   }
 
-  val rounds = 3
+  val rounds = 1
 
-  override def expectedTestDuration: FiniteDuration = 45.seconds * rounds
+  override def expectedTestDuration: FiniteDuration = 3.minutes
 
   def awaitAllMembersUp(additionaSystems: Vector[ActorSystem]): Unit = {
     val numberOfMembers = roles.size + roles.size * additionaSystems.size
@@ -82,11 +86,13 @@ abstract class NodeChurnSpec
   }
 
   "Cluster with short lived members" must {
-    "setup stable nodes" taggedAs LongRunningTest in within(15.seconds) {
+    "setup stable nodes" taggedAs LongRunningTest in within(60.seconds) {
       val logListener = system.actorOf(Props(classOf[LogListener], testActor), "logListener")
       system.eventStream.subscribe(logListener, classOf[Info])
       cluster.joinSeedNodes(seedNodes)
       awaitMembersUp(roles.size)
+      Thread.sleep(10000)
+      enterBarrier("done-1")
     }
 
     "join and remove transient nodes without growing gossip payload" taggedAs LongRunningTest in {
@@ -95,27 +101,26 @@ abstract class NodeChurnSpec
       // It will fail after a while if vector clock entries of removed nodes are not pruned.
       for (n ← 1 to rounds) {
         log.info("round-" + n)
-        val systems = Vector.fill(5)(ActorSystem(system.name, system.settings.config))
+        log.info("### HERE it starts 3 actor systems that joins the cluster and then shuts down.\n\n\n\n\n")
+        val systems = Vector.fill(1)(ActorSystem(system.name,
+          ConfigFactory.parseString("akka.loglevel=ERROR").withFallback(system.settings.config)))
         systems.foreach { s ⇒
           muteDeadLetters()(s)
           Cluster(s).joinSeedNodes(seedNodes)
         }
         awaitAllMembersUp(systems)
         enterBarrier("members-up-" + n)
-        systems.foreach { node ⇒
-          if (n % 2 == 0)
-            Cluster(node).down(Cluster(node).selfAddress)
-          else
-            Cluster(node).leave(Cluster(node).selfAddress)
-        }
-        awaitRemoved(systems)
-        enterBarrier("members-removed-" + n)
+
         systems.foreach(_.terminate().await)
+        awaitRemoved(systems)
         log.info("end of round-" + n)
+        log.info("terminated the 3 systems, waiting 30 seconds")
         // log listener will send to testActor if payload size exceed configured log-frame-size-exceeding
-        expectNoMsg(2.seconds)
+        expectNoMsg(30.seconds)
+        log.info("waited 30 seconds")
       }
       expectNoMsg(5.seconds)
+      enterBarrier("done-2")
     }
 
   }

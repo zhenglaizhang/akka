@@ -245,7 +245,10 @@ private[remote] class ReliableDeliverySupervisor(
   // (This actor is never restarted)
   var uidConfirmed: Boolean = uid.isDefined
 
+  log.info("### start {}", remoteAddress)
+
   override def postStop(): Unit = {
+    log.info("### postStop {}", remoteAddress)
     // All remaining messages in the buffer has to be delivered to dead letters. It is important to clear the sequence
     // number otherwise deadLetters will ignore it to avoid reporting system messages as dead letters while they are
     // still possibly retransmitted.
@@ -543,7 +546,10 @@ private[remote] class EndpointWriter(
   override def postRestart(reason: Throwable): Unit =
     throw new IllegalStateException("EndpointWriter must not be restarted")
 
+  //  log.info("### start {}", remoteAddress)
+
   override def postStop(): Unit = {
+    //    log.info("### postStop {}", remoteAddress)
     ackIdleTimer.cancel()
     while (!prioBuffer.isEmpty)
       extendedSystem.deadLetters ! prioBuffer.poll
@@ -893,7 +899,17 @@ private[remote] class EndpointReader(
     }
   }
 
-  override def postStop(): Unit = saveState()
+  //  log.info("### start {}", remoteAddress)
+
+  override def postStop(): Unit = {
+    //    log.info("### postStop {}", remoteAddress)
+    saveState()
+  }
+
+  override def postRestart(reason: Throwable): Unit = {
+    //    log.info("### postRestart {}", remoteAddress)
+    super.postRestart(reason)
+  }
 
   def saveState(): Unit = {
     def merge(currentState: ResendState, oldState: ResendState): ResendState =
