@@ -627,8 +627,10 @@ final class ClusterReceptionist(pubSubMediator: ActorRef, settings: ClusterRecep
       // Consistent hashing is used to ensure that the reply to GetContacts
       // is the same from all nodes (most of the time) and it also
       // load balances the client connections among the nodes in the cluster.
+
       if (numberOfContacts >= nodes.size) {
         val contacts = Contacts(nodes.map(a ⇒ self.path.toStringWithAddress(a))(collection.breakOut))
+        log.info(s"Client [{}] gets contactPoints [{}] ($numberOfContacts ${nodes.size})", sender().path, contacts.contactPoints.mkString(","))
         if (log.isDebugEnabled)
           log.debug("Client [{}] gets contactPoints [{}] (all nodes)", sender().path, contacts.contactPoints.mkString(","))
         sender() ! contacts
@@ -649,11 +651,13 @@ final class ClusterReceptionist(pubSubMediator: ActorRef, settings: ClusterRecep
 
     case state: CurrentClusterState ⇒
       nodes = nodes.empty ++ state.members.collect { case m if m.status != MemberStatus.Joining && matchingRole(m) ⇒ m.address }
+      log.info("got nodes update CurrentClusterState [{}]", nodes.mkString(","))
       consistentHash = ConsistentHash(nodes, virtualNodesFactor)
 
     case MemberUp(m) ⇒
       if (matchingRole(m)) {
         nodes += m.address
+        log.info("got nodes update MemberUp [{}]", nodes.mkString(","))
         consistentHash = ConsistentHash(nodes, virtualNodesFactor)
       }
 
@@ -662,6 +666,7 @@ final class ClusterReceptionist(pubSubMediator: ActorRef, settings: ClusterRecep
         context stop self
       else if (matchingRole(m)) {
         nodes -= m.address
+        log.info("got nodes update MemberRemoved [{}]", nodes.mkString(","))
         consistentHash = ConsistentHash(nodes, virtualNodesFactor)
       }
 
