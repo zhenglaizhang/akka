@@ -365,7 +365,7 @@ private[stream] final class GraphInterpreter(
       } catch {
         case NonFatal(e) ⇒ logic.failStage(e)
       }
-      stageHasRun(logic)
+      afterStageHasRun(logic)
       i += 1
     }
   }
@@ -425,7 +425,7 @@ private[stream] final class GraphInterpreter(
           if (activeStage == null) throw e
           else activeStage.failStage(e)
       }
-      stageHasRun(activeStage)
+      afterStageHasRun(activeStage)
       eventsRemaining -= 1
       if (eventsRemaining > 0) connection = dequeue()
     }
@@ -509,7 +509,7 @@ private[stream] final class GraphInterpreter(
     queueTail += 1
   }
 
-  def stageHasRun(logic: GraphStageLogic): Unit =
+  def afterStageHasRun(logic: GraphStageLogic): Unit =
     if (isStageCompleted(logic)) {
       runningStages -= 1
       finalizeStage(logic)

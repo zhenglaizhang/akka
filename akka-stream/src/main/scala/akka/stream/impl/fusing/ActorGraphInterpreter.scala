@@ -356,7 +356,7 @@ private[stream] class ActorGraphInterpreter(
         catch {
           case NonFatal(e) ⇒ logic.failStage(e)
         }
-        interpreter.stageHasRun(logic)
+        interpreter.afterStageHasRun(logic)
       }
       runBatch()
 

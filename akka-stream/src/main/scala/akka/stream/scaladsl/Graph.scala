@@ -132,7 +132,7 @@ object MergePreferred {
  *
  * '''Backpressures when''' downstream backpressures
  *
- * '''Completes when''' all upstreams complete
+ * '''Completes when''' all upstreams complete (eagerClose=false) or one upstream completes (eagerClose=true)
  *
  * '''Cancels when''' downstream cancels
  *
@@ -146,87 +146,82 @@ class MergePreferred[T] private (val secondaryPorts: Int, val eagerClose: Boolea
   def out: Outlet[T] = shape.out
   def preferred: Inlet[T] = shape.preferred
 
-  // FIXME: Factor out common stuff with Merge
   override def createLogic(inheritedAttributes: Attributes): GraphStageLogic = new GraphStageLogic(shape) {
-    private var initialized = false
-
-    private val pendingQueue = Array.ofDim[Inlet[T]](secondaryPorts)
-    private var pendingHead = 0
-    private var pendingTail = 0
-
-    private var runningUpstreams = secondaryPorts + 1
-    private def upstreamsClosed = runningUpstreams == 0
-
-    private def pending: Boolean = pendingHead != pendingTail
-    private def priority: Boolean = isAvailable(preferred)
-
-    private def enqueue(in: Inlet[T]): Unit = {
-      pendingQueue(pendingTail % secondaryPorts) = in
-      pendingTail += 1
+    var openInputs = secondaryPorts + 1
+    def onComplete(): Unit = {
+      openInputs -= 1
+      if (eagerClose || openInputs == 0) completeStage()
     }
-
-    private def dequeueAndDispatch(): Unit = {
-      val in = pendingQueue(pendingHead % secondaryPorts)
-      pendingHead += 1
-      push(out, grab(in))
-      if (upstreamsClosed && !pending && !priority) completeStage()
-      else tryPull(in)
-    }
-
-    shape.inSeq.foreach { i ⇒
-      setHandler(i, new InHandler {
-        override def onPush(): Unit = {
-          if (isAvailable(out)) {
-            push(out, grab(i))
-            tryPull(i)
-          } else enqueue(i)
-        }
-
-        override def onUpstreamFinish() =
-          if (eagerClose) {
-            (0 until secondaryPorts).foreach(i ⇒ cancel(in(i)))
-            cancel(preferred)
-            runningUpstreams = 0
-            if (!pending) completeStage()
-          } else {
-            runningUpstreams -= 1
-            if (upstreamsClosed && !pending && !priority) completeStage()
-          }
-      })
-    }
-
-    setHandler(preferred, new InHandler {
-      override def onPush() = {
-        if (isAvailable(out)) {
-          push(out, grab(preferred))
-          tryPull(preferred)
-        }
-      }
-
-      override def onUpstreamFinish() =
-        if (eagerClose) {
-          (0 until secondaryPorts).foreach(i ⇒ cancel(in(i)))
-          runningUpstreams = 0
-          if (!pending) completeStage()
-        } else {
-          runningUpstreams -= 1
-          if (upstreamsClosed && !pending && !priority) completeStage()
-        }
-    })
 
     setHandler(out, new OutHandler {
+      private var first = true
       override def onPull(): Unit = {
-        if (!initialized) {
-          initialized = true
+        if (first) {
+          first = false
           tryPull(preferred)
           shape.inSeq.foreach(tryPull)
-        } else if (priority) {
-          push(out, grab(preferred))
-          tryPull(preferred)
-        } else if (pending)
-          dequeueAndDispatch()
+        }
       }
     })
+
+    val pullMe = Array.tabulate(secondaryPorts)(i ⇒ {
+      val port = in(i)
+      () ⇒ tryPull(port)
+    })
+
+    /*
+     * This determines the unfairness of the merge:
+     * - at 1 the preferred will grab 40% of the bandwidth against three equally fast secondaries
+     * - at 2 the preferred will grab almost all bandwidth against three equally fast secondaries
+     * (measured with eventLimit=1 in the GraphInterpreter, so may not be accurate)
+     */
+    val maxEmitting = 2
+    var preferredEmitting = 0
+
+    setHandler(preferred, new InHandler {
+      override def onUpstreamFinish(): Unit = onComplete()
+      override def onPush(): Unit =
+        if (preferredEmitting == maxEmitting) () // blocked
+        else emitPreferred()
+
+      def emitPreferred(): Unit = {
+        preferredEmitting += 1
+        emit(out, grab(preferred), emitted)
+        tryPull(preferred)
+      }
+
+      val emitted = () ⇒ {
+        preferredEmitting -= 1
+        if (isAvailable(preferred)) emitPreferred()
+        else if (preferredEmitting == 0) emitSecondary()
+      }
+
+      def emitSecondary(): Unit = {
+        var i = 0
+        while (i < secondaryPorts) {
+          val port = in(i)
+          if (isAvailable(port)) emit(out, grab(port), pullMe(i))
+          i += 1
+        }
+      }
+    })
+
+    var i = 0
+    while (i < secondaryPorts) {
+      val port = in(i)
+      val pullPort = pullMe(i)
+      setHandler(port, new InHandler {
+        override def onPush(): Unit = {
+          if (preferredEmitting > 0) () // blocked
+          else {
+            emit(out, grab(port), pullPort)
+          }
+        }
+        override def onUpstreamFinish(): Unit = onComplete()
+      })
+      i += 1
+    }
+
   }
 }
 

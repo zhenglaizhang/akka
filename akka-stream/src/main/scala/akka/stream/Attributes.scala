@@ -63,13 +63,13 @@ final case class Attributes(attributeList: List[Attributes.Attribute] = Nil) {
    * Get the last (most specific) attribute of a given type parameter T `Class` or subclass thereof.
    * If no such attribute exists the `default` value is returned.
    */
-  def get[T <: Attribute : ClassTag](default: T) =
+  def get[T <: Attribute: ClassTag](default: T) =
     getAttribute(classTag[T].runtimeClass.asInstanceOf[Class[T]], default)
 
   /**
    * Get the last (most specific) attribute of a given type parameter T `Class` or subclass thereof.
    */
-  def get[T <: Attribute : ClassTag] =
+  def get[T <: Attribute: ClassTag] =
     getAttribute(classTag[T].runtimeClass.asInstanceOf[Class[T]])
 
   /**
