@@ -188,7 +188,9 @@ object TestSubscriber {
     override def toString: String = {
       val str = new StringWriter
       val out = new PrintWriter(str)
+      out.print("OnError(")
       cause.printStackTrace(out)
+      out.print(")")
       str.toString
     }
   }

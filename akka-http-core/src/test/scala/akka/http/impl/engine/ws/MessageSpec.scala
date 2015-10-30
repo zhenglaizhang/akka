@@ -13,6 +13,7 @@ import akka.stream.testkit._
 import akka.util.ByteString
 import akka.http.scaladsl.model.ws._
 import Protocol.Opcode
+import akka.testkit.EventFilter
 
 class MessageSpec extends FreeSpec with Matchers with WithMaterializerSpec {
   import WSTestUtils._
@@ -595,15 +596,18 @@ class MessageSpec extends FreeSpec with Matchers with WithMaterializerSpec {
         netIn.expectCancellation()
       }
       "if user handler fails" in new ServerTestSetup {
-        messageOut.sendError(new RuntimeException("Oops, user handler failed!"))
-        expectCloseCodeOnNetwork(Protocol.CloseCodes.UnexpectedCondition)
+        EventFilter[RuntimeException](message = "Oops, user handler failed!", occurrences = 1)
+          .intercept {
+            messageOut.sendError(new RuntimeException("Oops, user handler failed!"))
+            expectCloseCodeOnNetwork(Protocol.CloseCodes.UnexpectedCondition)
 
-        expectNoNetworkData() // wait for peer to close regularly
-        pushInput(closeFrame(Protocol.CloseCodes.Regular, mask = true))
+            expectNoNetworkData() // wait for peer to close regularly
+            pushInput(closeFrame(Protocol.CloseCodes.Regular, mask = true))
 
-        expectComplete(messageIn)
-        netOut.expectComplete()
-        netIn.expectCancellation()
+            expectComplete(messageIn)
+            netOut.expectComplete()
+            netIn.expectCancellation()
+          }
       }
       "if peer closes with invalid close frame" - {
         "close code outside of the valid range" in new ServerTestSetup {
