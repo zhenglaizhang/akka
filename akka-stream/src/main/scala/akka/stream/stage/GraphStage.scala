@@ -606,8 +606,11 @@ abstract class GraphStageLogic private[stream] (val inCount: Int, val outCount: 
           case e: Emitting[_] ⇒ followUps foreach (f ⇒ e.as[T].addFollowUp(f))
           case _ ⇒
             val next = followUps.dequeue()
-            if (followUps.nonEmpty) next.followUps = followUps
-            setHandler(out, next)
+            if (next.isInstanceOf[EmittingCompletion[_]]) complete(out)
+            else {
+              if (followUps.nonEmpty) next.followUps = followUps
+              setHandler(out, next)
+            }
         }
       }
     }
@@ -650,9 +653,10 @@ abstract class GraphStageLogic private[stream] (val inCount: Int, val outCount: 
    */
   final protected def passAlong[Out, In <: Out](from: Inlet[In], to: Outlet[Out], doFinish: Boolean, doFail: Boolean): Unit =
     setHandler(from, new InHandler {
+      val puller = () ⇒ tryPull(from)
       override def onPush(): Unit = {
         val elem = grab(from)
-        emit(to, elem, () ⇒ tryPull(from))
+        emit(to, elem, puller)
       }
       override def onUpstreamFinish(): Unit = if (doFinish) super.onUpstreamFinish()
       override def onUpstreamFailure(ex: Throwable): Unit = if (doFail) super.onUpstreamFailure(ex)

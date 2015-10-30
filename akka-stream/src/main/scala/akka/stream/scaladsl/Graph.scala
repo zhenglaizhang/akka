@@ -41,65 +41,30 @@ class Merge[T] private (val inputPorts: Int, val eagerClose: Boolean) extends Gr
   override val shape: UniformFanInShape[T, T] = UniformFanInShape(out, in: _*)
 
   override def createLogic(inheritedAttributes: Attributes): GraphStageLogic = new GraphStageLogic(shape) {
-    private var initialized = false
-
-    private val pendingQueue = Array.ofDim[Inlet[T]](inputPorts)
-    private var pendingHead = 0
-    private var pendingTail = 0
-
-    private var runningUpstreams = inputPorts
-    private def upstreamsClosed = runningUpstreams == 0
-
-    private def pending: Boolean = pendingHead != pendingTail
-
-    private def enqueue(in: Inlet[T]): Unit = {
-      pendingQueue(pendingTail % inputPorts) = in
-      pendingTail += 1
-    }
-
-    private def dequeueAndDispatch(): Unit = {
-      val in = pendingQueue(pendingHead % inputPorts)
-      pendingHead += 1
-      push(out, grab(in))
-      if (upstreamsClosed && !pending) completeStage()
-      else tryPull(in)
-    }
-
-    in.foreach { i ⇒
-      setHandler(i, new InHandler {
-        override def onPush(): Unit = {
-          if (isAvailable(out)) {
-            if (!pending) {
-              push(out, grab(i))
-              tryPull(i)
-            }
-          } else enqueue(i)
-        }
-
-        override def onUpstreamFinish() =
-          if (eagerClose) {
-            in.foreach(cancel)
-            runningUpstreams = 0
-            if (!pending) completeStage()
-          } else {
-            runningUpstreams -= 1
-            if (upstreamsClosed && !pending) completeStage()
-          }
-      })
+    var openInputs = inputPorts
+    def onComplete(): Unit = {
+      openInputs -= 1
+      if (eagerClose || openInputs == 0) completeStage()
     }
 
     setHandler(out, new OutHandler {
+      private var first = true
       override def onPull(): Unit = {
-        if (!initialized) {
-          initialized = true
+        if (first) {
+          first = false
           in.foreach(tryPull)
-        } else if (pending)
-          dequeueAndDispatch()
+        }
       }
     })
-  }
 
-  override def toString = "Merge"
+    in.foreach { port ⇒
+      setHandler(port, new InHandler {
+        val pullPort = () ⇒ tryPull(port)
+        override def onPush(): Unit = emit(out, grab(port), pullPort)
+        override def onUpstreamFinish(): Unit = onComplete()
+      })
+    }
+  }
 }
 
 object MergePreferred {
