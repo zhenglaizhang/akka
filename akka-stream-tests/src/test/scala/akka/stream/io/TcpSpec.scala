@@ -350,12 +350,14 @@ class TcpSpec extends AkkaSpec("akka.io.tcp.windows-connection-abort-workaround-
             conn.flow.join(writeButIgnoreRead).run()
           })(Keep.left).run(), 3.seconds)
 
-      val result = Source.maybe[ByteString]
+      val (promise, result) = Source.maybe[ByteString]
         .via(Tcp().outgoingConnection(serverAddress.getHostName, serverAddress.getPort))
-        .runFold(ByteString.empty)(_ ++ _)
+        .toMat(Sink.fold(ByteString.empty)(_ ++ _))(Keep.both)
+        .run()
 
       Await.result(result, 3.seconds) should ===(ByteString("Early response"))
 
+      promise.success(None) // close client upstream, no more data
       binding.unbind()
     }
 
