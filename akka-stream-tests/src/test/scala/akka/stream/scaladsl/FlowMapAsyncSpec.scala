@@ -21,8 +21,13 @@ import scala.util.Try
 import scala.concurrent.ExecutionContext
 import scala.util.Failure
 import scala.util.Success
+import scala.annotation.tailrec
+import scala.concurrent.Promise
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.LinkedBlockingQueue
+import org.scalatest.concurrent.ScalaFutures
 
-class FlowMapAsyncSpec extends AkkaSpec {
+class FlowMapAsyncSpec extends AkkaSpec with ScalaFutures {
 
   implicit val materializer = ActorMaterializer()
 
@@ -204,6 +209,52 @@ class FlowMapAsyncSpec extends AkkaSpec {
 
       upstream.expectCancellation()
 
+    }
+
+    "not run more futures than configured" in assertAllStagesStopped {
+      val parallelism = 8
+
+      val counter = new AtomicInteger
+      val queue = new LinkedBlockingQueue[(Promise[Int], Long)]
+
+      val timer = new Thread {
+        val delay = 50000 // nanoseconds
+        var count = 0
+        @tailrec final override def run(): Unit = {
+          val cont = try {
+            val (promise, enqueued) = queue.take()
+            val wakeup = enqueued + delay
+            while (System.nanoTime() < wakeup) {}
+            counter.decrementAndGet()
+            promise.success(count)
+            count += 1
+            true
+          } catch {
+            case _: InterruptedException ⇒ false
+          }
+          if (cont) run()
+        }
+      }
+      timer.start
+
+      def deferred(): Future[Int] = {
+        if (counter.incrementAndGet() > parallelism) Future.failed(new Exception("parallelism exceeded"))
+        else {
+          val p = Promise[Int]
+          queue.offer(p -> System.nanoTime())
+          p.future
+        }
+      }
+
+      try {
+        val N = 100000
+        Source(1 to N)
+          .mapAsync(parallelism)(i ⇒ deferred())
+          .runFold(0)((c, _) ⇒ c + 1)
+          .futureValue(PatienceConfig(3.seconds)) should ===(N)
+      } finally {
+        timer.interrupt()
+      }
     }
 
   }

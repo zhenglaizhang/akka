@@ -157,6 +157,8 @@ private[stream] object AbstractStage {
 
     override def preStart(): Unit = currentStage.preStart(ctx)
     override def postStop(): Unit = currentStage.postStop()
+
+    override def toString: String = s"PushPullGraphLogic($currentStage)"
   }
 
   class PushPullGraphStageWithMaterializedValue[-In, +Out, Ext, +Mat](

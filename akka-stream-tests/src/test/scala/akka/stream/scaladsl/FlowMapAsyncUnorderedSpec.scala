@@ -7,7 +7,6 @@ import scala.concurrent.Await
 import scala.concurrent.Future
 import scala.concurrent.duration._
 import scala.util.control.NoStackTrace
-
 import akka.stream.ActorMaterializer
 import akka.stream.testkit._
 import akka.stream.testkit.scaladsl._
@@ -17,8 +16,15 @@ import akka.testkit.TestProbe
 import akka.stream.ActorAttributes.supervisionStrategy
 import akka.stream.Supervision.resumingDecider
 import akka.stream.impl.ReactiveStreamsCompliance
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.ConcurrentLinkedQueue
+import scala.concurrent.Promise
+import java.util.concurrent.LinkedBlockingQueue
+import scala.annotation.tailrec
+import org.scalatest.concurrent.ScalaFutures
+import org.scalactic.ConversionCheckedTripleEquals
 
-class FlowMapAsyncUnorderedSpec extends AkkaSpec {
+class FlowMapAsyncUnorderedSpec extends AkkaSpec with ScalaFutures with ConversionCheckedTripleEquals {
 
   implicit val materializer = ActorMaterializer()
 
@@ -178,7 +184,7 @@ class FlowMapAsyncUnorderedSpec extends AkkaSpec {
       c.expectComplete()
     }
 
-    "should handle cancel properly" in assertAllStagesStopped {
+    "handle cancel properly" in assertAllStagesStopped {
       val pub = TestPublisher.manualProbe[Int]()
       val sub = TestSubscriber.manualProbe[Int]()
 
@@ -191,6 +197,52 @@ class FlowMapAsyncUnorderedSpec extends AkkaSpec {
 
       upstream.expectCancellation()
 
+    }
+
+    "not run more futures than configured" in assertAllStagesStopped {
+      val parallelism = 8
+
+      val counter = new AtomicInteger
+      val queue = new LinkedBlockingQueue[(Promise[Int], Long)]
+
+      val timer = new Thread {
+        val delay = 50000 // nanoseconds
+        var count = 0
+        @tailrec final override def run(): Unit = {
+          val cont = try {
+            val (promise, enqueued) = queue.take()
+            val wakeup = enqueued + delay
+            while (System.nanoTime() < wakeup) {}
+            counter.decrementAndGet()
+            promise.success(count)
+            count += 1
+            true
+          } catch {
+            case _: InterruptedException ⇒ false
+          }
+          if (cont) run()
+        }
+      }
+      timer.start
+
+      def deferred(): Future[Int] = {
+        if (counter.incrementAndGet() > parallelism) Future.failed(new Exception("parallelism exceeded"))
+        else {
+          val p = Promise[Int]
+          queue.offer(p -> System.nanoTime())
+          p.future
+        }
+      }
+
+      try {
+        val N = 100000
+        Source(1 to N)
+          .mapAsyncUnordered(parallelism)(i ⇒ deferred())
+          .runFold(0)((c, _) ⇒ c + 1)
+          .futureValue(PatienceConfig(3.seconds)) should ===(N)
+      } finally {
+        timer.interrupt()
+      }
     }
 
   }

@@ -302,7 +302,7 @@ private[stream] final class GraphInterpreter(
     })
     s"(${eventQueue.length}, $queueHead, $queueTail)(${contents.mkString(", ")})"
   }
-  private def Name: String = f"${System.identityHashCode(this)}%08X"
+  lazy val Name: String = f"${System.identityHashCode(this)}%08X"
 
   /**
    * Assign the boundary logic to a given connection. This will serve as the interface to the external world

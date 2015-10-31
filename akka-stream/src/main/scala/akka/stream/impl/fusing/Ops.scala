@@ -625,6 +625,8 @@ private[akka] final case class MapAsyncUnordered[In, Out](parallelism: Int, f: I
   override val shape = FlowShape(in, out)
 
   override def createLogic(inheritedAttributes: Attributes) = new GraphStageLogic(shape) {
+    override def toString = s"MapAsyncUnordered.Logic(inFlight=$inFlight, buffer=$buffer)"
+
     val decider =
       inheritedAttributes.getAttribute(classOf[SupervisionStrategy])
         .map(_.decider).getOrElse(Supervision.stoppingDecider)
@@ -673,9 +675,9 @@ private[akka] final case class MapAsyncUnordered[In, Out](parallelism: Int, f: I
 
     setHandler(out, new OutHandler {
       override def onPull(): Unit = {
-        if (!hasBeenPulled(in)) tryPull(in)
         if (!buffer.isEmpty) push(out, buffer.dequeue())
         else if (isClosed(in) && todo == 0) completeStage()
+        if (todo < parallelism && !hasBeenPulled(in)) tryPull(in)
       }
     })
   }
