@@ -648,7 +648,7 @@ abstract class GraphStageLogic private[stream] (val inCount: Int, val outCount: 
   }
 
   private class EmittingSingle[T](_out: Outlet[T], elem: T, _previous: OutHandler, _andThen: () ⇒ Unit)
-      extends Emitting(_out, _previous, _andThen) {
+    extends Emitting(_out, _previous, _andThen) {
 
     override def onPull(): Unit = {
       push(out, elem)
@@ -657,7 +657,7 @@ abstract class GraphStageLogic private[stream] (val inCount: Int, val outCount: 
   }
 
   private class EmittingIterator[T](_out: Outlet[T], elems: Iterator[T], _previous: OutHandler, _andThen: () ⇒ Unit)
-      extends Emitting(_out, _previous, _andThen) {
+    extends Emitting(_out, _previous, _andThen) {
 
     override def onPull(): Unit = {
       push(out, elems.next())
@@ -865,7 +865,12 @@ trait OutHandler {
    * Called when the output port will no longer accept any new elements. After this callback no other callbacks will
    * be called for this port.
    */
-  def onDownstreamFinish(): Unit = GraphInterpreter.currentInterpreter.activeStage.completeStage()
+  def onDownstreamFinish(): Unit = {
+    GraphInterpreter
+      .currentInterpreter
+      .activeStage
+      .completeStage()
+  }
 }
 
 /**

@@ -332,13 +332,13 @@ private[stream] object GraphInterpreter {
  * edge of a balance is pulled, dissolving the original cycle).
  */
 private[stream] final class GraphInterpreter(
-    private val assembly: GraphInterpreter.GraphAssembly,
-    val materializer: Materializer,
-    val log: LoggingAdapter,
-    val inHandlers: Array[InHandler], // Lookup table for the InHandler of a connection
-    val outHandlers: Array[OutHandler], // Lookup table for the outHandler of the connection
-    val logics: Array[GraphStageLogic], // Array of stage logics
-    val onAsyncInput: (GraphStageLogic, Any, (Any) ⇒ Unit) ⇒ Unit) {
+  private val assembly: GraphInterpreter.GraphAssembly,
+  val materializer: Materializer,
+  val log: LoggingAdapter,
+  val inHandlers: Array[InHandler], // Lookup table for the InHandler of a connection
+  val outHandlers: Array[OutHandler], // Lookup table for the outHandler of the connection
+  val logics: Array[GraphStageLogic], // Array of stage logics
+  val onAsyncInput: (GraphStageLogic, Any, (Any) ⇒ Unit) ⇒ Unit) {
   import GraphInterpreter._
 
   // Maintains additional information for events, basically elements in-flight, or failure.
